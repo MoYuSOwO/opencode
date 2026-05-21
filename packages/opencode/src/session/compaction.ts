@@ -443,8 +443,7 @@ export const layer = Layer.effect(
         "1. 情感、闲聊、个人信息、情绪、打趣、反映人际关系的内容 → 原话保留，一字不改，不画蛇添足",
         "2. 技术讨论、工具调用、代码 → 总结重点和过程，可以改写但不能丢失关键信息",
         "",
-        "输出格式: [轮N] 洛笙: <内容> / 小浔: <内容>",
-        "输出语言必须和输入相同。只输出压缩结果，不输出解释。",
+        "输出纯文本压缩结果。不添加轮次标记、不添加格式包装、不输出解释。输出语言和输入相同。",
       ].join("\n")
 
       const ctx = yield* InstanceState.context
@@ -520,9 +519,8 @@ export const layer = Layer.effect(
 
       // ── 并行压缩每轮 ──
       const compressResults = yield* Effect.all(
-        compressTurns.map((turn, i) =>
+        compressTurns.map((turn) =>
           Effect.gen(function* () {
-            const roundNum = summaryEnd + 1 + i
             const turnModels = yield* MessageV2.toModelMessagesEffect(turn, model, {
               stripMedia: true,
               toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
@@ -539,7 +537,7 @@ export const layer = Layer.effect(
                 retries: 1,
                 messages: [
                   ...turnModels,
-                  { role: "user", content: `压缩为 [轮${roundNum}] 洛笙: ... / 小浔: ... 格式。逐句判断: 情感/闲聊/个人信息原话保留, 技术/工具/代码总结重点。输出语言和输入一致。` },
+                  { role: "user", content: "逐句判断压缩。情感/闲聊/个人信息原话保留，技术/工具/代码总结重点。输出纯文本，不加轮次标记。" },
                 ],
               })
               .pipe(
@@ -548,14 +546,14 @@ export const layer = Layer.effect(
                 Stream.mkString,
                 Effect.orDie,
               )
-            return { roundNum, text: text.trim(), turn }
+            return { text: text.trim(), turn }
           }),
         ),
         { concurrency: 8 },
       )
 
-      for (const { text, roundNum, turn } of compressResults) {
-        combinedOutput += `[轮${roundNum}] ${text}\n\n`
+      for (const { text, turn } of compressResults) {
+        combinedOutput += text + "\n\n"
 
         // 写回原文: 更新此轮 user message 的 text part
         for (const msg of turn) {
@@ -566,7 +564,7 @@ export const layer = Layer.effect(
           if (textParts.length > 0) {
             yield* session.updatePart({
               ...textParts[0],
-              text: `[轮${roundNum}] ${text}`,
+              text: text,
             } as any)
           }
         }
