@@ -335,7 +335,7 @@ export interface Hooks {
    * Inject memory recall results and topic context as a synthetic user message before the real one.
    */
   "chat.turn.prestart"?: (
-    input: { sessionID: string; agent: string; model: { providerID: string; modelID: string } },
+    input: { sessionID: string; agent: string; model: { providerID: string; modelID: string }; lastUserMessage: string },
     output: { system: string[]; contextText: string },
   ) => Promise<void>
   /**

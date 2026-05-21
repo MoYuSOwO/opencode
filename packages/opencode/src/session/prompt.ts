@@ -1442,7 +1442,7 @@ export const layer = Layer.effect(
             if (step === 1) {
               const prestart = yield* plugin.trigger(
                 "chat.turn.prestart",
-                { sessionID, agent: agent.name, model: { providerID: model.providerID, modelID: model.id } },
+                { sessionID, agent: agent.name, model: { providerID: model.providerID, modelID: model.id }, lastUserMessage: lastUserText },
                 { system: [] as string[], contextText: "" },
               )
               system.push(...prestart.system)
