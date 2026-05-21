@@ -56,6 +56,10 @@ export const Parameters = Schema.Struct({
   background: Schema.optional(Schema.Boolean).annotate({
     description: "When true, launch the subagent in the background and return immediately",
   }),
+  silent: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "When true with background=true, suppress toast notifications and result injection. The agent runs invisibly.",
+  }),
 })
 
 function output(sessionID: SessionID, text: string) {
@@ -276,17 +280,20 @@ export const TaskTool = Tool.define(
       }
 
       if (runInBackground) {
+        const isSilent = params.silent === true
         const info = yield* background.start({
           id: nextSession.id,
           type: id,
           title: params.description,
           metadata,
           run: runTask().pipe(
-            Effect.tap((text) => inject("completed", text).pipe(Effect.ignore)),
+            Effect.tap((text) => (isSilent ? Effect.void : inject("completed", text).pipe(Effect.ignore))),
             Effect.catchCause((cause) =>
               (Cause.hasInterruptsOnly(cause)
                 ? Effect.void
-                : inject("error", errorText(Cause.squash(cause))).pipe(Effect.ignore)
+                : isSilent
+                  ? Effect.void
+                  : inject("error", errorText(Cause.squash(cause))).pipe(Effect.ignore)
               ).pipe(Effect.andThen(Effect.failCause(cause))),
             ),
           ),
