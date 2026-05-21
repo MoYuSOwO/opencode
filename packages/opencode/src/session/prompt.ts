@@ -1325,28 +1325,16 @@ export const layer = Layer.effect(
             continue
           }
 
-          if (
-            lastFinished &&
-            lastFinished.summary !== true &&
-            (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model }))
-          ) {
-            yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
-            continue
-          }
-
-          // Custom threshold trigger for multi-pass compaction
-          if (
-            lastFinished &&
-            lastFinished.summary !== true
-          ) {
+          if (lastFinished && lastFinished.summary !== true) {
             const cfg = yield* config.get()
             const triggerTokens = cfg.compaction?.trigger_tokens
-            if (triggerTokens != null) {
-              const total = lastFinished.tokens.input + lastFinished.tokens.output
-              if (total > triggerTokens) {
-                yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
-                continue
-              }
+            const shouldCompact =
+              triggerTokens != null
+                ? lastFinished.tokens.input + lastFinished.tokens.output > triggerTokens
+                : yield* compaction.isOverflow({ tokens: lastFinished.tokens, model })
+            if (shouldCompact) {
+              yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
+              continue
             }
           }
 
