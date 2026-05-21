@@ -331,6 +331,14 @@ export interface Hooks {
    */
   "tool.definition"?: (input: { toolID: string }, output: { description: string; parameters: any }) => Promise<void>
   /**
+   * Called once when a session becomes active (runLoop first entry).
+   * Use for one-time setup like writing runtime info.
+   */
+  "session.start"?: (
+    input: { sessionID: string },
+    output: {},
+  ) => Promise<void>
+  /**
    * Called before each turn's LLM loop begins (step === 1 only, not on tool-call re-loops).
    * Inject memory recall results and topic context as a synthetic user message before the real one.
    * syncTasks are spawned synchronously — OC waits for each, collects outputs, and injects them.
