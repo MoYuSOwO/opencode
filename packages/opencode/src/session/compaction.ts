@@ -436,7 +436,7 @@ export const layer = Layer.effect(
           previousSummary,
           context: compacting.context,
         }) +
-          "\n\nOutput 200-400 tokens. Be concise but preserve key decisions, user preferences, and technical facts."
+          "\n\nOutput 5000-10000 tokens. Be thorough — preserve key decisions, user preferences, emotional content, and technical facts. Do not omit important context."
 
       const COMPRESS_SYSTEM = [
         "Compress each conversation turn into 1-2 sentences.",
