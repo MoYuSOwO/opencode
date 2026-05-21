@@ -333,17 +333,30 @@ export interface Hooks {
   /**
    * Called before each turn's LLM loop begins (step === 1 only, not on tool-call re-loops).
    * Inject memory recall results and topic context as a synthetic user message before the real one.
+   * syncTasks are spawned synchronously — OC waits for each, collects outputs, and injects them.
    */
   "chat.turn.prestart"?: (
     input: { sessionID: string; agent: string; model: { providerID: string; modelID: string }; lastUserMessage: string },
-    output: { system: string[]; contextText: string },
+    output: {
+      system: string[]
+      contextText: string
+      syncTasks: Array<{ subagent_type: string; description: string; prompt: string }>
+    },
   ) => Promise<void>
   /**
    * Called after each turn completes (LLM loop exits).
-   * Use for post-turn tasks: memory saving, topic updates, compact checks.
+   * tasks are spawned as background agents (background=true, silent=true by default).
    */
   "chat.turn.end"?: (
     input: { sessionID: string; agent: string; lastUserMessage: string; lastAssistantMessage: string },
-    output: {},
+    output: {
+      tasks: Array<{
+        subagent_type: string
+        description: string
+        prompt: string
+        background?: boolean
+        silent?: boolean
+      }>
+    },
   ) => Promise<void>
 }

@@ -1246,6 +1246,7 @@ export const layer = Layer.effect(
         let turnAgent = ""
         let lastUserText = ""
         let lastAssistantText = ""
+        let lastModel: { providerID: ProviderID; modelID: ModelID } = { providerID: ProviderID.make(""), modelID: ModelID.make("") }
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
         while (true) {
@@ -1300,6 +1301,7 @@ export const layer = Layer.effect(
             }).pipe(Effect.ignore, Effect.forkIn(scope))
 
           const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
+          lastModel = { providerID: model.providerID, modelID: model.id }
           const task = tasks.pop()
 
           if (task?.type === "subtask") {
@@ -1443,18 +1445,45 @@ export const layer = Layer.effect(
               const prestart = yield* plugin.trigger(
                 "chat.turn.prestart",
                 { sessionID, agent: agent.name, model: { providerID: model.providerID, modelID: model.id }, lastUserMessage: lastUserText },
-                { system: [] as string[], contextText: "" },
+                { system: [] as string[], contextText: "", syncTasks: [] },
               )
               system.push(...prestart.system)
-              if (prestart.contextText) {
+
+              // Run sync tasks — each spawns a sub-agent synchronously
+              let taskOutputs: string[] = []
+              for (const taskDef of prestart.syncTasks) {
+                const taskAgent = yield* agents.get(taskDef.subagent_type)
+                if (taskAgent) {
+                  const taskModel = taskAgent.model ?? { providerID: model.providerID, modelID: model.id }
+                  const taskSession = yield* sessions.create({
+                    parentID: sessionID,
+                    title: taskDef.description + ` (@${taskAgent.name} subagent)`,
+                    permission: taskAgent.permission,
+                  })
+                  const taskParts = yield* resolvePromptParts(taskDef.prompt)
+                  yield* sessions.touch(taskSession.id)
+                  const taskResult = yield* ops.prompt({
+                    sessionID: taskSession.id,
+                    model: taskModel,
+                    agent: taskAgent.name,
+                    tools: { task: false },
+                    parts: taskParts,
+                    noReply: false,
+                  })
+                  const taskText = taskResult.parts.findLast((p) => (p as any).type === "text")?.text ?? ""
+                  if (taskText) taskOutputs.push(taskText)
+                }
+              }
+
+              const allContext = [prestart.contextText, ...taskOutputs].filter(Boolean).join("\n\n")
+              if (allContext) {
                 const ctxMsg = msgs.findLast((m) => m.info.role === "user")
                 if (ctxMsg) {
                   const parts: any[] = [...ctxMsg.parts]
                   parts.unshift({
                     type: "text",
-                    text: prestart.contextText,
+                    text: allContext,
                     synthetic: true,
-                    id: ("id" in parts[0] ? undefined : undefined) as any,
                     sessionID,
                     messageID: ctxMsg.info.id,
                   } as any)
@@ -1515,9 +1544,37 @@ export const layer = Layer.effect(
           continue
         }
 
-        yield* plugin
-          .trigger("chat.turn.end", { sessionID, agent: turnAgent, lastUserMessage: lastUserText, lastAssistantMessage: lastAssistantText }, {})
-          .pipe(Effect.ignore, Effect.forkIn(scope))
+        const endResult = yield* plugin.trigger(
+          "chat.turn.end",
+          { sessionID, agent: turnAgent, lastUserMessage: lastUserText, lastAssistantMessage: lastAssistantText },
+          { tasks: [] },
+        )
+
+        // Spawn background agent tasks
+        for (const taskDef of endResult.tasks) {
+          const taskAgent = yield* agents.get(taskDef.subagent_type)
+          if (taskAgent) {
+            const taskModel = taskAgent.model ?? lastModel
+            const isSilent = taskDef.silent !== false
+            const silentSession = yield* sessions.create({
+              parentID: sessionID,
+              title: taskDef.description + ` (@${taskAgent.name} subagent)`,
+              permission: taskAgent.permission,
+            })
+            const taskParts = yield* resolvePromptParts(taskDef.prompt)
+            yield* sessions.touch(silentSession.id)
+            yield* ops
+              .prompt({
+                sessionID: silentSession.id,
+                model: taskModel,
+                agent: taskAgent.name,
+                tools: { task: false },
+                parts: taskParts,
+                noReply: true,
+              })
+              .pipe(Effect.ignore, Effect.forkIn(scope))
+          }
+        }
 
         yield* compaction.prune({ sessionID }).pipe(Effect.ignore, Effect.forkIn(scope))
         return yield* lastAssistant(sessionID)
