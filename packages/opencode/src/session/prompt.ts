@@ -1472,24 +1472,26 @@ export const layer = Layer.effect(
               for (const taskDef of prestart.syncTasks) {
                 const taskAgent = yield* agents.get(taskDef.subagent_type)
                 if (taskAgent) {
-                  const taskModel = taskAgent.model ?? { providerID: model.providerID, modelID: model.id }
-                  const taskSession = yield* sessions.create({
-                    parentID: sessionID,
-                    title: taskDef.description + ` (@${taskAgent.name} subagent)`,
-                    permission: taskAgent.permission,
-                  })
-                  const taskParts = yield* resolvePromptParts(taskDef.prompt)
-                  yield* sessions.touch(taskSession.id)
-                  const taskResult = yield* ops.prompt({
-                    sessionID: taskSession.id,
-                    model: taskModel,
-                    agent: taskAgent.name,
-                    tools: { task: false },
-                    parts: taskParts,
-                    noReply: false,
-                  })
-                  const taskText = taskResult.parts.findLast((p) => (p as any).type === "text")?.text ?? ""
-                  if (taskText) taskOutputs.push(taskText)
+                  yield* Effect.gen(function* () {
+                    const taskModel = taskAgent.model ?? { providerID: model.providerID, modelID: model.id }
+                    const taskSession = yield* sessions.create({
+                      parentID: sessionID,
+                      title: taskDef.description + ` (@${taskAgent.name} subagent)`,
+                      permission: taskAgent.permission,
+                    })
+                    const taskParts = yield* resolvePromptParts(taskDef.prompt)
+                    yield* sessions.touch(taskSession.id)
+                    const taskResult = yield* ops.prompt({
+                      sessionID: taskSession.id,
+                      model: taskModel,
+                      agent: taskAgent.name,
+                      tools: { task: false },
+                      parts: taskParts,
+                      noReply: false,
+                    })
+                    const taskText = taskResult.parts.findLast((p) => (p as any).type === "text")?.text ?? ""
+                    if (taskText) taskOutputs.push(taskText)
+                  }).pipe(Effect.catchAllCause(() => Effect.void))
                 }
               }
 
