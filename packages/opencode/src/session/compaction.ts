@@ -7,12 +7,13 @@ import { MessageV2 } from "./message-v2"
 import { Token } from "@/util/token"
 import * as Log from "@opencode-ai/core/util/log"
 import { SessionProcessor } from "./processor"
+import { LLM } from "./llm"
 import { Agent } from "@/agent/agent"
 import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { NotFoundError } from "@/storage/storage"
 import { ModelID, ProviderID } from "@/provider/schema"
-import { Effect, Layer, Context, Schema } from "effect"
+import { Effect, Layer, Context, Schema, Stream } from "effect"
 import * as DateTime from "effect/DateTime"
 import { InstanceState } from "@/effect/instance-state"
 import { isOverflow as overflow, usable } from "./overflow"
@@ -20,6 +21,7 @@ import { serviceUse } from "@/effect/service-use"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { SessionEvent } from "@opencode-ai/core/session-event"
+import { LLMEvent } from "@opencode-ai/llm"
 
 const log = Log.create({ service: "session.compaction" })
 
@@ -219,6 +221,7 @@ export const layer = Layer.effect(
     const plugin = yield* Plugin.Service
     const processors = yield* SessionProcessor.Service
     const provider = yield* Provider.Service
+    const llm = yield* LLM.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
 
@@ -400,15 +403,42 @@ export const layer = Layer.effect(
         { sessionID: input.sessionID },
         { context: [], prompt: undefined },
       )
-      const nextPrompt = compacting.prompt ?? buildPrompt({ previousSummary, context: compacting.context })
       const msgs = structuredClone(selected.head)
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
-      const modelMessages = yield* MessageV2.toModelMessagesEffect(msgs, model, {
-        stripMedia: true,
-        toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
+
+      // ── 切分: 按 token 50/50 把 head 分成 summary 区 + compress 区 ──
+      const headTokens = yield* estimate({ messages: msgs, model })
+      const halfTokens = Math.floor(headTokens / 2)
+
+      let summaryEnd = 0
+      let accumTokens = 0
+      for (const m of msgs) {
+        const t = yield* estimate({ messages: [m], model })
+        if (accumTokens + t > halfTokens && summaryEnd > 0) break
+        accumTokens += t
+        summaryEnd++
+      }
+
+      const summaryMsgs = msgs.slice(0, summaryEnd)
+      const compressMsgs = msgs.slice(summaryEnd)
+
+      // ── 生成压缩 prompt ──
+      const summaryPrompt = compacting.prompt ?? buildPrompt({
+        previousSummary,
+        context: compacting.context,
       })
+
+      const COMPRESS_SYSTEM = [
+        "Compress each conversation turn into 1-2 sentences.",
+        "Preserve 洛笙's quotes and emotional content verbatim.",
+        "Summarize tool outputs, code snippets, and technical details.",
+        "Output format for each turn: [轮N] 洛笙: <text> / 小浔: <text>",
+        "Output ONLY the compressed turns, no preamble.",
+        "Keep each turn as short as possible while preserving key information.",
+      ].join("\n")
+
       const ctx = yield* InstanceState.context
-      const msg: MessageV2.Assistant = {
+      const summaryMsg: MessageV2.Assistant = {
         id: MessageID.ascending(),
         role: "assistant",
         parentID: input.parentID,
@@ -417,55 +447,131 @@ export const layer = Layer.effect(
         agent: "compaction",
         variant: userMessage.model.variant,
         summary: true,
-        path: {
-          cwd: ctx.directory,
-          root: ctx.worktree,
-        },
+        path: { cwd: ctx.directory, root: ctx.worktree },
         cost: 0,
-        tokens: {
-          output: 0,
-          input: 0,
-          reasoning: 0,
-          cache: { read: 0, write: 0 },
-        },
+        tokens: { output: 0, input: 0, reasoning: 0, cache: { read: 0, write: 0 } },
         modelID: model.id,
         providerID: model.providerID,
-        time: {
-          created: Date.now(),
-        },
+        time: { created: Date.now() },
       }
-      yield* session.updateMessage(msg)
-      const processor = yield* processors.create({
-        assistantMessage: msg,
+      yield* session.updateMessage(summaryMsg)
+
+      // ── Summary 区: 一次 LLM 调用 ──
+      const summaryProcessor = yield* processors.create({
+        assistantMessage: summaryMsg,
         sessionID: input.sessionID,
         model,
       })
-      const result = yield* processor.process({
+      const summaryModels = yield* MessageV2.toModelMessagesEffect(summaryMsgs, model, {
+        stripMedia: true,
+        toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
+      })
+      const summaryResult = yield* summaryProcessor.process({
         user: userMessage,
         agent,
         sessionID: input.sessionID,
         tools: {},
         system: [],
         messages: [
-          ...modelMessages,
-          {
-            role: "user",
-            content: [{ type: "text", text: nextPrompt }],
-          },
+          ...summaryModels,
+          { role: "user", content: [{ type: "text", text: summaryPrompt }] },
         ],
         model,
       })
 
-      if (result === "compact") {
-        processor.message.error = new MessageV2.ContextOverflowError({
-          message: replay
-            ? "Conversation history too large to compact - exceeds model context limit"
-            : "Session too large to compact - context exceeds model limit even after stripping media",
+      let combinedOutput = ""
+      if (summaryResult === "continue") {
+        const summaryText = summaryProcessor.message.parts
+          .filter((p) => p.type === "text")
+          .map((p) => p.text)
+          .join("\n\n")
+        combinedOutput = summaryText ? summaryText + "\n\n" : ""
+      } else if (summaryResult === "compact") {
+        summaryProcessor.message.error = new MessageV2.ContextOverflowError({
+          message: "Summary pass exceeds model context limit",
         }).toObject()
-        processor.message.finish = "error"
-        yield* session.updateMessage(processor.message)
+        summaryProcessor.message.finish = "error"
+        yield* session.updateMessage(summaryProcessor.message)
         return "stop"
       }
+
+      // ── Compress 区: 分批 (每 6K token 一批), 每批一次 LLM ──
+      const COMPRESS_BATCH_TOKENS = 6000
+      const compressBatches: MessageV2.WithParts[][] = []
+      let curBatch: MessageV2.WithParts[] = []
+      let curTokens = 0
+      for (const m of compressMsgs) {
+        const t = yield* estimate({ messages: [m], model })
+        if (curTokens + t > COMPRESS_BATCH_TOKENS && curBatch.length > 0) {
+          compressBatches.push(curBatch)
+          curBatch = []
+          curTokens = 0
+        }
+        curBatch.push(m)
+        curTokens += t
+      }
+      if (curBatch.length > 0) compressBatches.push(curBatch)
+
+      let roundIdx = summaryEnd + 1
+      for (const batch of compressBatches) {
+        const batchModels = yield* MessageV2.toModelMessagesEffect(batch, model, {
+          stripMedia: true,
+          toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
+        })
+        const compressText = yield* llm
+          .stream({
+            agent,
+            user: userMessage,
+            system: [COMPRESS_SYSTEM],
+            small: true,
+            tools: {},
+            model,
+            sessionID: input.sessionID,
+            retries: 1,
+            messages: [
+              ...batchModels,
+              {
+                role: "user",
+                content: `Compress the above turns. Start numbering from 轮${roundIdx}. Output ONLY the compressed turns:`,
+              },
+            ],
+          })
+          .pipe(
+            Stream.filter(LLMEvent.is.textDelta),
+            Stream.map((e) => e.text),
+            Stream.mkString,
+            Effect.orDie,
+          )
+
+        combinedOutput += compressText + "\n\n"
+
+        // 更新压缩区每条消息的 text part
+        const lines = compressText.split("\n").filter((l) => l.trim())
+        let lineIdx = 0
+        for (const msg of batch) {
+          for (const part of msg.parts) {
+            if (part.type !== "text" || part.synthetic) continue
+            const compressedLine = lines[lineIdx]?.trim()
+            if (compressedLine) {
+              yield* session.updatePart({
+                ...part,
+                text: compressedLine,
+              })
+            }
+            lineIdx++
+          }
+        }
+        roundIdx += batch.length
+      }
+
+      const allOutput =
+        combinedOutput ||
+        summaryProcessor.message.parts
+          .filter((p) => p.type === "text")
+          .map((p) => p.text)
+          .join("\n\n")
+
+      const result = summaryResult
 
       if (compactionPart && selected.tail_start_id && compactionPart.tail_start_id !== selected.tail_start_id) {
         yield* session.updatePart({
@@ -632,6 +738,7 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(Bus.layer),
     Layer.provide(Config.defaultLayer),
     Layer.provide(RuntimeFlags.defaultLayer),
+    Layer.provide(LLM.defaultLayer),
     Layer.provide(EventV2Bridge.defaultLayer),
   ),
 )
