@@ -397,7 +397,6 @@ export const layer = Layer.effect(
         cfg: {
           ...cfg,
           compaction: {
-            tail_turns: 100,
             preserve_recent_tokens: 80000,
             prune: cfg.compaction?.prune ?? true,
           },
@@ -436,15 +435,16 @@ export const layer = Layer.effect(
           previousSummary,
           context: compacting.context,
         }) +
-          "\n\nOutput 5000-10000 tokens. Be thorough — preserve key decisions, user preferences, emotional content, and technical facts. Do not omit important context."
+          "\n\nOutput 5000-10000 tokens. You MUST output in the SAME LANGUAGE as the input. Be thorough — preserve key decisions, user preferences, emotional content, and technical facts. Do not omit important context."
 
       const COMPRESS_SYSTEM = [
-        "Compress each conversation turn into 1-2 sentences.",
-        "Preserve 洛笙's quotes and emotional content verbatim.",
-        "Summarize tool outputs, code snippets, and technical details.",
-        "Output format for each turn: [轮N] 洛笙: <text> / 小浔: <text>",
-        "Output ONLY the compressed turns, no preamble.",
-        "Keep each turn as short as possible while preserving key information.",
+        "你是对话压缩助手。逐句判断内容类型，分类处理：",
+        "",
+        "1. 情感、闲聊、个人信息、情绪、打趣、反映人际关系的内容 → 原话保留，一字不改，不画蛇添足",
+        "2. 技术讨论、工具调用、代码 → 总结重点和过程，可以改写但不能丢失关键信息",
+        "",
+        "输出格式: [轮N] 洛笙: <内容> / 小浔: <内容>",
+        "输出语言必须和输入相同。只输出压缩结果，不输出解释。",
       ].join("\n")
 
       const ctx = yield* InstanceState.context
@@ -539,7 +539,7 @@ export const layer = Layer.effect(
                 retries: 1,
                 messages: [
                   ...turnModels,
-                  { role: "user", content: `Compress into: [轮${roundNum}] 洛笙: <1句> / 小浔: <1句>` },
+                  { role: "user", content: `压缩为 [轮${roundNum}] 洛笙: ... / 小浔: ... 格式。逐句判断: 情感/闲聊/个人信息原话保留, 技术/工具/代码总结重点。输出语言和输入一致。` },
                 ],
               })
               .pipe(
