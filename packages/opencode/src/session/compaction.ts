@@ -389,10 +389,10 @@ export const layer = Layer.effect(
         : yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID).pipe(Effect.orDie)
       const cfg = yield* config.get()
 
-      // Custom threshold check: skip compaction if below 350K tokens
-      const COMPACTION_THRESHOLD = 350_000
+      // Configurable compaction threshold; skip if below
+      const triggerTokens = cfg.compaction?.trigger_tokens ?? 350_000
       const totalEstimate = yield* estimate({ messages, model })
-      if (totalEstimate < COMPACTION_THRESHOLD) {
+      if (totalEstimate < triggerTokens) {
         return "continue" as const
       }
       const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
@@ -404,7 +404,8 @@ export const layer = Layer.effect(
         cfg: {
           ...cfg,
           compaction: {
-            preserve_recent_tokens: 80000,
+            ...cfg.compaction,
+            preserve_recent_tokens: cfg.compaction?.preserve_recent_tokens ?? 80000,
             prune: cfg.compaction?.prune ?? true,
           },
         },
