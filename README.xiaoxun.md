@@ -65,11 +65,3 @@ Only `type` is new. All other fields are upstream-native.
 - **Config-gated** — multi-pass features only activate when configured
 - **English-only** — no localized strings in source changes
 
-## Companion files (not in this repo)
-
-- `~/.config/opencode/agents/memory-recall.md` — memory recall sub-agent
-- `~/.config/opencode/agents/memory-save.md` — memory save sub-agent
-- `~/.config/opencode/agents/topic-inject.md` — topic injection sub-agent
-- `~/.config/opencode/agents/topic-check.md` — topic detection sub-agent
-- `~/.config/opencode/command/smart-compact.md` — manual compaction command
-- `xiaoxun/plugin/index.ts` — lifecycle plugin using the new hooks
