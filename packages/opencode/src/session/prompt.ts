@@ -1243,6 +1243,7 @@ export const layer = Layer.effect(
         const slog = elog.with({ sessionID })
         let structured: unknown
         let step = 0
+        let turnAgent = ""
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
         while (true) {
@@ -1254,6 +1255,8 @@ export const layer = Layer.effect(
           const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
 
           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
+
+          turnAgent = lastUser.agent ?? ""
 
           const lastAssistantMsg = msgs.findLast(
             (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
@@ -1424,6 +1427,14 @@ export const layer = Layer.effect(
               MessageV2.toModelMessagesEffect(msgs, model),
             ])
             const system = [...env, ...instructions, ...(skills ? [skills] : [])]
+            if (step === 1) {
+              const prestart = yield* plugin.trigger(
+                "chat.turn.prestart",
+                { sessionID, agent: agent.name, model: { providerID: model.providerID, modelID: model.id } },
+                { system: [] as string[] },
+              )
+              system.push(...prestart.system)
+            }
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
             const result = yield* handle.process({
@@ -1476,6 +1487,10 @@ export const layer = Layer.effect(
           if (outcome === "break") break
           continue
         }
+
+        yield* plugin
+          .trigger("chat.turn.end", { sessionID, agent: turnAgent }, {})
+          .pipe(Effect.ignore, Effect.forkIn(scope))
 
         yield* compaction.prune({ sessionID }).pipe(Effect.ignore, Effect.forkIn(scope))
         return yield* lastAssistant(sessionID)

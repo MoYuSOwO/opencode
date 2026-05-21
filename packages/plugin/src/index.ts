@@ -330,4 +330,20 @@ export interface Hooks {
    * Modify tool definitions (description and parameters) sent to LLM
    */
   "tool.definition"?: (input: { toolID: string }, output: { description: string; parameters: any }) => Promise<void>
+  /**
+   * Called before each turn's LLM loop begins (step === 1 only, not on tool-call re-loops).
+   * Use to inject memory recall results and topic context into the system prompt.
+   */
+  "chat.turn.prestart"?: (
+    input: { sessionID: string; agent: string; model: { providerID: string; modelID: string } },
+    output: { system: string[] },
+  ) => Promise<void>
+  /**
+   * Called after each turn completes (LLM loop exits).
+   * Use for post-turn tasks: memory saving, topic updates, compact checks.
+   */
+  "chat.turn.end"?: (
+    input: { sessionID: string; agent: string },
+    output: {},
+  ) => Promise<void>
 }
