@@ -544,32 +544,26 @@ export const layer = Layer.effect(
           )
 
         combinedOutput += compressText + "\n\n"
-
-        // 更新压缩区每条消息的 text part
-        const lines = compressText.split("\n").filter((l) => l.trim())
-        let lineIdx = 0
-        for (const msg of batch) {
-          for (const part of msg.parts) {
-            if (part.type !== "text" || part.synthetic) continue
-            const compressedLine = lines[lineIdx]?.trim()
-            if (compressedLine) {
-              yield* session.updatePart({
-                ...part,
-                text: compressedLine,
-              })
-            }
-            lineIdx++
-          }
-        }
         roundIdx += batch.length
       }
 
-      const allOutput =
-        combinedOutput ||
-        summaryProcessor.message.parts
-          .filter((p) => p.type === "text")
-          .map((p) => p.text)
-          .join("\n\n")
+      // 将压缩文本存入 summary 消息
+      const allOutput = combinedOutput.trim()
+      if (allOutput) {
+        const existingParts = summaryProcessor.message.parts.filter(
+          (p) => p.type === "text",
+        )
+        const existingText = existingParts.map((p) => p.text).join("\n\n")
+        const fullText = existingText ? existingText + "\n\n" + allOutput : allOutput
+
+        // 更新 summary 消息的 text part
+        if (existingParts.length > 0) {
+          yield* session.updatePart({
+            ...existingParts[0],
+            text: fullText,
+          })
+        }
+      }
 
       const result = summaryResult
 
