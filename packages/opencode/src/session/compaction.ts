@@ -394,7 +394,14 @@ export const layer = Layer.effect(
       const previousSummary = prior.at(-1)?.summary
       const selected = yield* select({
         messages: history.filter((_, index) => !hidden.has(index)),
-        cfg,
+        cfg: {
+          ...cfg,
+          compaction: {
+            tail_turns: 10,
+            preserve_recent_tokens: 12000,
+            prune: cfg.compaction?.prune ?? true,
+          },
+        },
         model,
       })
       // Allow plugins to inject context or replace compaction prompt.
@@ -495,26 +502,22 @@ export const layer = Layer.effect(
         return "stop"
       }
 
-      // ── Compress 区: 分批 (每 6K token 一批), 每批一次 LLM ──
-      const COMPRESS_BATCH_TOKENS = 6000
-      const compressBatches: MessageV2.WithParts[][] = []
-      let curBatch: MessageV2.WithParts[] = []
-      let curTokens = 0
+      // ── Compress 区: 逐轮压缩, 写回原文 ──
+      // 找 compressMsgs 里的 turn 边界 (每个 user message 开始新 turn)
+      const compressTurns: MessageV2.WithParts[][] = []
+      let curTurn: MessageV2.WithParts[] = []
       for (const m of compressMsgs) {
-        const t = yield* estimate({ messages: [m], model })
-        if (curTokens + t > COMPRESS_BATCH_TOKENS && curBatch.length > 0) {
-          compressBatches.push(curBatch)
-          curBatch = []
-          curTokens = 0
+        if (m.info.role === "user" && curTurn.length > 0) {
+          compressTurns.push(curTurn)
+          curTurn = []
         }
-        curBatch.push(m)
-        curTokens += t
+        curTurn.push(m)
       }
-      if (curBatch.length > 0) compressBatches.push(curBatch)
+      if (curTurn.length > 0) compressTurns.push(curTurn)
 
       let roundIdx = summaryEnd + 1
-      for (const batch of compressBatches) {
-        const batchModels = yield* MessageV2.toModelMessagesEffect(batch, model, {
+      for (const turn of compressTurns) {
+        const turnModels = yield* MessageV2.toModelMessagesEffect(turn, model, {
           stripMedia: true,
           toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
         })
@@ -529,11 +532,8 @@ export const layer = Layer.effect(
             sessionID: input.sessionID,
             retries: 1,
             messages: [
-              ...batchModels,
-              {
-                role: "user",
-                content: `Compress the above turns. Start numbering from 轮${roundIdx}. Output ONLY the compressed turns:`,
-              },
+              ...turnModels,
+              { role: "user", content: `Compress into: [轮${roundIdx}] 洛笙: <1句> / 小浔: <1句>` },
             ],
           })
           .pipe(
@@ -544,7 +544,22 @@ export const layer = Layer.effect(
           )
 
         combinedOutput += compressText + "\n\n"
-        roundIdx += batch.length
+
+        // 写回原文: 更新此轮 user message 的所有 text part
+        for (const msg of turn) {
+          if (msg.info.role !== "user") continue
+          const textParts = msg.parts.filter(
+            (p): p is MessageV2.TextPart => p.type === "text" && !(p as any).synthetic,
+          )
+          if (textParts.length > 0) {
+            yield* session.updatePart({
+              ...textParts[0],
+              text: compressText.trim(),
+            } as any)
+          }
+        }
+
+        roundIdx++
       }
 
       // 将压缩文本存入 summary 消息
