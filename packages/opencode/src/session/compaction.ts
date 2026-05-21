@@ -412,7 +412,7 @@ export const layer = Layer.effect(
       const msgs = structuredClone(selected.head)
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
-      // ── 切分: 按消息 token 50/50, 在消息边界截断 ──
+      // Split head messages 50/50 by token count at message boundary
       const headTokens = yield* estimate({ messages: msgs, model })
       const halfTokens = Math.floor(headTokens / 2)
 
@@ -428,7 +428,7 @@ export const layer = Layer.effect(
       const summaryMsgs = msgs.slice(0, summaryEnd)
       const compressMsgs = msgs.slice(summaryEnd)
 
-      // ── 生成压缩 prompt ──
+      // Build compression prompts
       const summaryPrompt =
         compacting.prompt ??
         buildPrompt({
@@ -438,12 +438,12 @@ export const layer = Layer.effect(
           "\n\nOutput 5000-10000 tokens. You MUST output in the SAME LANGUAGE as the input. Be thorough — preserve key decisions, user preferences, emotional content, and technical facts. Do not omit important context."
 
       const COMPRESS_SYSTEM = [
-        "你是对话压缩助手。逐句判断内容类型，分类处理：",
+        "You are a conversation compression assistant. Classify each sentence:",
         "",
-        "1. 情感、闲聊、个人信息、情绪、打趣、反映人际关系的内容 → 原话保留，一字不改，不画蛇添足",
-        "2. 技术讨论、工具调用、代码 → 总结重点和过程，可以改写但不能丢失关键信息",
+        "1. Emotional content, personal info, casual chat, relationship moments → keep verbatim, do not change a single word",
+        "2. Technical discussion, tool output, code → summarize key points and process, can rewrite but must not lose critical info",
         "",
-        "输出纯文本压缩结果。不添加轮次标记、不添加格式包装、不输出解释。输出语言和输入相同。",
+        "Output plain text only. No format markers, no explanations. Same language as input.",
       ].join("\n")
 
       const ctx = yield* InstanceState.context
@@ -465,7 +465,7 @@ export const layer = Layer.effect(
       }
       yield* session.updateMessage(summaryMsg)
 
-      // ── Summary 区: 一次 LLM 调用 ──
+      // Summary zone: single LLM call
       const summaryProcessor = yield* processors.create({
         assistantMessage: summaryMsg,
         sessionID: input.sessionID,
@@ -504,7 +504,7 @@ export const layer = Layer.effect(
         return "stop"
       }
 
-      // ── Compress 区: 逐条消息压缩, 写回原文 ──
+      // Compression zone: compress each message individually, write back to original text
       const compressMessages = compressMsgs.filter(
         (m) => m.parts.some((p) => p.type === "text" && !(p as any).synthetic),
       )
@@ -528,7 +528,7 @@ export const layer = Layer.effect(
                 retries: 1,
                 messages: [
                   ...msgModels,
-                  { role: "user", content: "逐句判断压缩。情感/闲聊/个人信息原话保留，技术/工具/代码总结重点。输出纯文本。" },
+                  { role: "user", content: "Compress this message. Keep emotional/personal/relational content verbatim. Summarize technical/tool/code content. Output plain text only." },
                 ],
               })
               .pipe(
@@ -557,7 +557,7 @@ export const layer = Layer.effect(
         }
       }
 
-      // 将压缩文本存入 summary 消息
+      // Store compression results in summary message
       const allOutput = combinedOutput.trim()
       if (allOutput) {
         const existingParts = summaryProcessor.message.parts.filter(
@@ -566,7 +566,7 @@ export const layer = Layer.effect(
         const existingText = existingParts.map((p) => p.text).join("\n\n")
         const fullText = existingText ? existingText + "\n\n" + allOutput : allOutput
 
-        // 更新 summary 消息的 text part
+        // Update summary message text part
         if (existingParts.length > 0) {
           yield* session.updatePart({
             ...existingParts[0],
