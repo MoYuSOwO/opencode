@@ -392,9 +392,16 @@ export const layer = Layer.effect(
       const prior = completedCompactions(history)
       const hidden = new Set(prior.flatMap((item) => [item.userIndex, item.assistantIndex]))
       const previousSummary = prior.at(-1)?.summary
+      const isMultiPass = cfg.compaction?.type === "multi-pass"
+      const compactionCfg = isMultiPass
+        ? {
+            ...cfg.compaction,
+            preserve_recent_tokens: cfg.compaction?.preserve_recent_tokens ?? 80000,
+          }
+        : cfg.compaction
       const selected = yield* select({
         messages: history.filter((_, index) => !hidden.has(index)),
-        cfg,
+        cfg: { ...cfg, compaction: compactionCfg },
         model,
       })
       // Allow plugins to inject context or replace compaction prompt.
@@ -406,10 +413,9 @@ export const layer = Layer.effect(
       const msgs = structuredClone(selected.head)
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
-      const useMultiPass = cfg.compaction?.type === "multi-pass"
       let result: "continue" | "stop" | "compact"
 
-      if (useMultiPass) {
+      if (isMultiPass) {
         // Split head messages 50/50 by token count at message boundary
         const headTokens = yield* estimate({ messages: msgs, model })
         const halfTokens = Math.floor(headTokens / 2)
