@@ -397,8 +397,8 @@ export const layer = Layer.effect(
         cfg: {
           ...cfg,
           compaction: {
-            tail_turns: 10,
-            preserve_recent_tokens: 12000,
+            tail_turns: 100,
+            preserve_recent_tokens: 80000,
             prune: cfg.compaction?.prune ?? true,
           },
         },
@@ -430,10 +430,13 @@ export const layer = Layer.effect(
       const compressMsgs = msgs.slice(summaryEnd)
 
       // ── 生成压缩 prompt ──
-      const summaryPrompt = compacting.prompt ?? buildPrompt({
-        previousSummary,
-        context: compacting.context,
-      })
+      const summaryPrompt =
+        compacting.prompt ??
+        buildPrompt({
+          previousSummary,
+          context: compacting.context,
+        }) +
+          "\n\nOutput 200-400 tokens. Be concise but preserve key decisions, user preferences, and technical facts."
 
       const COMPRESS_SYSTEM = [
         "Compress each conversation turn into 1-2 sentences.",
@@ -515,37 +518,46 @@ export const layer = Layer.effect(
       }
       if (curTurn.length > 0) compressTurns.push(curTurn)
 
-      let roundIdx = summaryEnd + 1
-      for (const turn of compressTurns) {
-        const turnModels = yield* MessageV2.toModelMessagesEffect(turn, model, {
-          stripMedia: true,
-          toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
-        })
-        const compressText = yield* llm
-          .stream({
-            agent,
-            user: userMessage,
-            system: [COMPRESS_SYSTEM],
-            small: true,
-            tools: {},
-            model,
-            sessionID: input.sessionID,
-            retries: 1,
-            messages: [
-              ...turnModels,
-              { role: "user", content: `Compress into: [轮${roundIdx}] 洛笙: <1句> / 小浔: <1句>` },
-            ],
-          })
-          .pipe(
-            Stream.filter(LLMEvent.is.textDelta),
-            Stream.map((e) => e.text),
-            Stream.mkString,
-            Effect.orDie,
-          )
+      // ── 并行压缩每轮 ──
+      const compressResults = yield* Effect.all(
+        compressTurns.map((turn, i) =>
+          Effect.gen(function* () {
+            const roundNum = summaryEnd + 1 + i
+            const turnModels = yield* MessageV2.toModelMessagesEffect(turn, model, {
+              stripMedia: true,
+              toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
+            })
+            const text = yield* llm
+              .stream({
+                agent,
+                user: userMessage,
+                system: [COMPRESS_SYSTEM],
+                small: true,
+                tools: {},
+                model,
+                sessionID: input.sessionID,
+                retries: 1,
+                messages: [
+                  ...turnModels,
+                  { role: "user", content: `Compress into: [轮${roundNum}] 洛笙: <1句> / 小浔: <1句>` },
+                ],
+              })
+              .pipe(
+                Stream.filter(LLMEvent.is.textDelta),
+                Stream.map((e) => e.text),
+                Stream.mkString,
+                Effect.orDie,
+              )
+            return { roundNum, text: text.trim(), turn }
+          }),
+        ),
+        { concurrency: 8 },
+      )
 
-        combinedOutput += compressText + "\n\n"
+      for (const { text, roundNum, turn } of compressResults) {
+        combinedOutput += `[轮${roundNum}] ${text}\n\n`
 
-        // 写回原文: 更新此轮 user message 的所有 text part
+        // 写回原文: 更新此轮 user message 的 text part
         for (const msg of turn) {
           if (msg.info.role !== "user") continue
           const textParts = msg.parts.filter(
@@ -554,12 +566,10 @@ export const layer = Layer.effect(
           if (textParts.length > 0) {
             yield* session.updatePart({
               ...textParts[0],
-              text: compressText.trim(),
+              text: `[轮${roundNum}] ${text}`,
             } as any)
           }
         }
-
-        roundIdx++
       }
 
       // 将压缩文本存入 summary 消息
