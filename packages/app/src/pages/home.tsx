@@ -488,6 +488,7 @@ function LegacyHome() {
     if (healthy === false) return "bg-icon-critical-base"
     return "bg-border-weak-base"
   })
+  const useWebDirectoryPicker = createMemo(() => server.current?.type === "sidecar" && server.current.variant === "wsl")
 
   function openProject(directory: string) {
     layout.projects.open(directory)
@@ -506,7 +507,7 @@ function LegacyHome() {
       }
     }
 
-    if (platform.openDirectoryPickerDialog && server.isLocal()) {
+    if (platform.openDirectoryPickerDialog && server.isLocal() && !useWebDirectoryPicker()) {
       const result = await platform.openDirectoryPickerDialog?.({
         title: language.t("command.project.open"),
         multiple: true,
@@ -556,7 +557,7 @@ function LegacyHome() {
           size="normal"
           variant="ghost"
           class="text-12-regular text-text-weak px-3"
-          onClick={() => dialog.show(() => <DialogSelectServer />)}
+          onClick={() => dialog.show(() => <DialogSelectServer onNavigateHome={() => navigate("/")} />)}
         >
           <div
             classList={{
@@ -567,7 +568,6 @@ function LegacyHome() {
           {server.name}
         </Button>
       </div>
-
       <Switch>
         <Match when={recent().length > 0}>
           <div class="w-full flex flex-col items-center gap-6">
