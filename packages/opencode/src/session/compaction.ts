@@ -388,27 +388,13 @@ export const layer = Layer.effect(
         ? yield* provider.getModel(agent.model.providerID, agent.model.modelID).pipe(Effect.orDie)
         : yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID).pipe(Effect.orDie)
       const cfg = yield* config.get()
-
-      // Configurable compaction threshold; skip if below
-      const triggerTokens = cfg.compaction?.trigger_tokens ?? 350_000
-      const totalEstimate = yield* estimate({ messages, model })
-      if (totalEstimate < triggerTokens) {
-        return "continue" as const
-      }
       const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
       const prior = completedCompactions(history)
       const hidden = new Set(prior.flatMap((item) => [item.userIndex, item.assistantIndex]))
       const previousSummary = prior.at(-1)?.summary
       const selected = yield* select({
         messages: history.filter((_, index) => !hidden.has(index)),
-        cfg: {
-          ...cfg,
-          compaction: {
-            ...cfg.compaction,
-            preserve_recent_tokens: cfg.compaction?.preserve_recent_tokens ?? 80000,
-            prune: cfg.compaction?.prune ?? true,
-          },
-        },
+        cfg,
         model,
       })
       // Allow plugins to inject context or replace compaction prompt.
