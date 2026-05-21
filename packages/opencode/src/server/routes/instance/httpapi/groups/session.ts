@@ -90,6 +90,7 @@ export const SessionPaths = {
   summarize: `${root}/:sessionID/summarize`,
   prompt: `${root}/:sessionID/message`,
   promptAsync: `${root}/:sessionID/prompt_async`,
+  promptQueued: `${root}/:sessionID/prompt_queued`,
   command: `${root}/:sessionID/command`,
   shell: `${root}/:sessionID/shell`,
   revert: `${root}/:sessionID/revert`,
@@ -334,6 +335,20 @@ export const SessionApi = HttpApi.make("session")
             summary: "Send async message",
             description:
               "Create and send a new message to a session asynchronously, starting the session if needed and returning immediately.",
+          }),
+        ),
+        HttpApiEndpoint.post("promptQueued", SessionPaths.promptQueued, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          payload: PromptPayload,
+          success: described(HttpApiSchema.NoContent, "Prompt queued"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.prompt_queued",
+            summary: "Send queued message",
+            description:
+              "Create and send a new message to a session. If the session is busy, waits until idle before sending. Messages are delivered in order.",
           }),
         ),
         HttpApiEndpoint.post("command", SessionPaths.command, {

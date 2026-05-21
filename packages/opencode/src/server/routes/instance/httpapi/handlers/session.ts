@@ -320,6 +320,40 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       return HttpApiSchema.NoContent.make()
     })
 
+    const promptQueued = Effect.fn("SessionHttpApi.promptQueued")(function* (ctx: {
+      params: { sessionID: SessionID }
+      payload: typeof PromptPayload.Type
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+
+      // Wait until session is idle
+      const waitUntilIdle = Effect.fn("waitUntilIdle")(function* () {
+        while (true) {
+          const s = yield* statusSvc.get(ctx.params.sessionID)
+          if (s.type === "idle") return
+          yield* Effect.sleep("1 second")
+        }
+      })
+      yield* waitUntilIdle()
+
+      // Now send (same as promptAsync)
+      yield* promptSvc.prompt({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.gen(function* () {
+            yield* Effect.logError("prompt_queued failed").pipe(
+              Effect.annotateLogs({ sessionID: ctx.params.sessionID, cause }),
+            )
+            yield* bus.publish(Session.Event.Error, {
+              sessionID: ctx.params.sessionID,
+              error: new NamedError.Unknown({ message: Cause.pretty(cause) }).toObject(),
+            })
+          }),
+        ),
+        Effect.forkIn(scope, { startImmediately: true }),
+      )
+      return HttpApiSchema.NoContent.make()
+    })
+
     const command = Effect.fn("SessionHttpApi.command")(function* (ctx: {
       params: { sessionID: SessionID }
       payload: typeof CommandPayload.Type
@@ -413,6 +447,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("summarize", summarize)
       .handle("prompt", prompt)
       .handle("promptAsync", promptAsync)
+      .handle("promptQueued", promptQueued)
       .handle("command", command)
       .handle("shell", shell)
       .handle("revert", revert)
