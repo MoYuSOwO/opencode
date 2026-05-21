@@ -5,7 +5,7 @@ Soft fork adding lifecycle hooks, silent agents, and multi-pass compaction.
 **Branch**: `dev` (tracks upstream, rebase-friendly)
 **Upstream**: [anomalyco/opencode](https://github.com/anomalyco/opencode)
 
-## Changes (4 files, +396/-66 lines)
+## Changes (6 files, +446/-66 lines)
 
 ### 1. Lifecycle hooks — `packages/plugin/src/index.ts` (+29)
 
@@ -40,6 +40,18 @@ Compression rules (sentence-level classification):
 - Technical / tool / code content → summarized, key info preserved
 
 When type is not `"multi-pass"`, OC's original single-pass compaction runs unchanged.
+
+### 5. Queued message endpoint — server handler (+50)
+
+New HTTP endpoint for external message injection with built-in queue:
+
+**`POST /session/{sessionID}/prompt_queued`** — same payload as `prompt_async`, but waits until the session is idle before sending. If the session is busy, polls status every second and delivers as soon as the agent loop finishes. Guarantees messages are delivered in order without concurrent agent loops.
+
+```
+POST /session/{id}/prompt_queued
+{ "parts": [{"type": "text", "text": "hello"}] }
+→ 204 No Content (after session becomes idle)
+```
 
 ## Configuration
 
