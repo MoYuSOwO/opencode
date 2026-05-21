@@ -412,33 +412,21 @@ export const layer = Layer.effect(
       const msgs = structuredClone(selected.head)
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
-      // ── 切分: 按整轮 token 50/50 把 head 分成 summary 区 + compress 区 ──
-      // 先把 msgs 按 turn 分组（user message 开始新 turn）
-      const headTurns: MessageV2.WithParts[][] = []
-      let cur: MessageV2.WithParts[] = []
-      for (const m of msgs) {
-        if (m.info.role === "user" && cur.length > 0) {
-          headTurns.push(cur)
-          cur = []
-        }
-        cur.push(m)
-      }
-      if (cur.length > 0) headTurns.push(cur)
-
+      // ── 切分: 按消息 token 50/50, 在消息边界截断 ──
       const headTokens = yield* estimate({ messages: msgs, model })
       const halfTokens = Math.floor(headTokens / 2)
 
-      let summaryTurns = 0
+      let summaryEnd = 0
       let accumTokens = 0
-      for (const turn of headTurns) {
-        const t = yield* estimate({ messages: turn, model })
-        if (accumTokens + t > halfTokens && summaryTurns > 0) break
+      for (const m of msgs) {
+        const t = yield* estimate({ messages: [m], model })
+        if (accumTokens + t > halfTokens && summaryEnd > 0) break
         accumTokens += t
-        summaryTurns++
+        summaryEnd++
       }
 
-      const summaryMsgs = headTurns.slice(0, summaryTurns).flat()
-      const compressMsgs = headTurns.slice(summaryTurns).flat()
+      const summaryMsgs = msgs.slice(0, summaryEnd)
+      const compressMsgs = msgs.slice(summaryEnd)
 
       // ── 生成压缩 prompt ──
       const summaryPrompt =
@@ -516,24 +504,15 @@ export const layer = Layer.effect(
         return "stop"
       }
 
-      // ── Compress 区: 逐轮压缩, 写回原文 ──
-      // 找 compressMsgs 里的 turn 边界 (每个 user message 开始新 turn)
-      const compressTurns: MessageV2.WithParts[][] = []
-      let curTurn: MessageV2.WithParts[] = []
-      for (const m of compressMsgs) {
-        if (m.info.role === "user" && curTurn.length > 0) {
-          compressTurns.push(curTurn)
-          curTurn = []
-        }
-        curTurn.push(m)
-      }
-      if (curTurn.length > 0) compressTurns.push(curTurn)
+      // ── Compress 区: 逐条消息压缩, 写回原文 ──
+      const compressMessages = compressMsgs.filter(
+        (m) => m.parts.some((p) => p.type === "text" && !(p as any).synthetic),
+      )
 
-      // ── 并行压缩每轮 ──
       const compressResults = yield* Effect.all(
-        compressTurns.map((turn) =>
+        compressMessages.map((msg) =>
           Effect.gen(function* () {
-            const turnModels = yield* MessageV2.toModelMessagesEffect(turn, model, {
+            const msgModels = yield* MessageV2.toModelMessagesEffect([msg], model, {
               stripMedia: true,
               toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
             })
@@ -548,8 +527,8 @@ export const layer = Layer.effect(
                 sessionID: input.sessionID,
                 retries: 1,
                 messages: [
-                  ...turnModels,
-                  { role: "user", content: "逐句判断压缩。情感/闲聊/个人信息原话保留，技术/工具/代码总结重点。输出纯文本，不加轮次标记。" },
+                  ...msgModels,
+                  { role: "user", content: "逐句判断压缩。情感/闲聊/个人信息原话保留，技术/工具/代码总结重点。输出纯文本。" },
                 ],
               })
               .pipe(
@@ -558,27 +537,23 @@ export const layer = Layer.effect(
                 Stream.mkString,
                 Effect.orDie,
               )
-            return { text: text.trim(), turn }
+            return { text: text.trim(), msg }
           }),
         ),
         { concurrency: 8 },
       )
 
-      for (const { text, turn } of compressResults) {
+      for (const { text, msg } of compressResults) {
         combinedOutput += text + "\n\n"
 
-        // 写回原文: 更新此轮 user message 的 text part
-        for (const msg of turn) {
-          if (msg.info.role !== "user") continue
-          const textParts = msg.parts.filter(
-            (p): p is MessageV2.TextPart => p.type === "text" && !(p as any).synthetic,
-          )
-          if (textParts.length > 0) {
-            yield* session.updatePart({
-              ...textParts[0],
-              text: text,
-            } as any)
-          }
+        const textParts = msg.parts.filter(
+          (p): p is MessageV2.TextPart => p.type === "text" && !(p as any).synthetic,
+        )
+        if (textParts.length > 0) {
+          yield* session.updatePart({
+            ...textParts[0],
+            text,
+          } as any)
         }
       }
 
