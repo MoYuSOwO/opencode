@@ -1334,6 +1334,22 @@ export const layer = Layer.effect(
             continue
           }
 
+          // Custom threshold trigger for multi-pass compaction
+          if (
+            lastFinished &&
+            lastFinished.summary !== true
+          ) {
+            const cfg = yield* config.get()
+            const triggerTokens = cfg.compaction?.trigger_tokens
+            if (triggerTokens != null) {
+              const total = lastFinished.tokens.input + lastFinished.tokens.output
+              if (total > triggerTokens) {
+                yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
+                continue
+              }
+            }
+          }
+
           const agent = yield* agents.get(lastUser.agent)
           if (!agent) {
             const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
