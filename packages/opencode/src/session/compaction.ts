@@ -412,21 +412,33 @@ export const layer = Layer.effect(
       const msgs = structuredClone(selected.head)
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
-      // ── 切分: 按 token 50/50 把 head 分成 summary 区 + compress 区 ──
+      // ── 切分: 按整轮 token 50/50 把 head 分成 summary 区 + compress 区 ──
+      // 先把 msgs 按 turn 分组（user message 开始新 turn）
+      const headTurns: MessageV2.WithParts[][] = []
+      let cur: MessageV2.WithParts[] = []
+      for (const m of msgs) {
+        if (m.info.role === "user" && cur.length > 0) {
+          headTurns.push(cur)
+          cur = []
+        }
+        cur.push(m)
+      }
+      if (cur.length > 0) headTurns.push(cur)
+
       const headTokens = yield* estimate({ messages: msgs, model })
       const halfTokens = Math.floor(headTokens / 2)
 
-      let summaryEnd = 0
+      let summaryTurns = 0
       let accumTokens = 0
-      for (const m of msgs) {
-        const t = yield* estimate({ messages: [m], model })
-        if (accumTokens + t > halfTokens && summaryEnd > 0) break
+      for (const turn of headTurns) {
+        const t = yield* estimate({ messages: turn, model })
+        if (accumTokens + t > halfTokens && summaryTurns > 0) break
         accumTokens += t
-        summaryEnd++
+        summaryTurns++
       }
 
-      const summaryMsgs = msgs.slice(0, summaryEnd)
-      const compressMsgs = msgs.slice(summaryEnd)
+      const summaryMsgs = headTurns.slice(0, summaryTurns).flat()
+      const compressMsgs = headTurns.slice(summaryTurns).flat()
 
       // ── 生成压缩 prompt ──
       const summaryPrompt =
