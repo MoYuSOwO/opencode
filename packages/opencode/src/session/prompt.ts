@@ -1260,15 +1260,19 @@ export const layer = Layer.effect(
           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
 
           turnAgent = lastUser.agent ?? ""
+
+          const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
+          const _lastAsst = msgs.findLast((m) => m.info.role === "assistant" && m.info.id === lastAssistant?.id)
+
           lastUserText =
-            lastUser.parts
-              .filter((p) => p.type === "text" && !p.synthetic)
-              .map((p) => p.text)
+            lastUserMsg?.parts
+              .filter((p: any) => p.type === "text" && !(p as any).synthetic)
+              .map((p: any) => p.text)
               .join("\n") || ""
           lastAssistantText =
-            lastAssistantMsg?.parts
-              .filter((p) => p.type === "text")
-              .map((p) => p.text)
+            _lastAsst?.parts
+              .filter((p: any) => p.type === "text")
+              .map((p: any) => p.text)
               .join("\n") || ""
 
           const lastAssistantMsg = msgs.findLast(
@@ -1445,7 +1449,7 @@ export const layer = Layer.effect(
               const prestart = yield* plugin.trigger(
                 "chat.turn.prestart",
                 { sessionID, agent: agent.name, model: { providerID: model.providerID, modelID: model.id }, lastUserMessage: lastUserText },
-                { system: [] as string[], contextText: "", syncTasks: [] },
+                { system: [] as string[], contextText: "", syncTasks: [] as Array<{ subagent_type: string; description: string; prompt: string }> },
               )
               system.push(...prestart.system)
 
@@ -1547,7 +1551,7 @@ export const layer = Layer.effect(
         const endResult = yield* plugin.trigger(
           "chat.turn.end",
           { sessionID, agent: turnAgent, lastUserMessage: lastUserText, lastAssistantMessage: lastAssistantText },
-          { tasks: [] },
+          { tasks: [] as Array<{ subagent_type: string; description: string; prompt: string; background?: boolean; silent?: boolean }> },
         )
 
         // Spawn background agent tasks
