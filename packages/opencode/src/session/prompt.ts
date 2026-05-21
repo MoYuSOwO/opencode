@@ -1244,6 +1244,8 @@ export const layer = Layer.effect(
         let structured: unknown
         let step = 0
         let turnAgent = ""
+        let lastUserText = ""
+        let lastAssistantText = ""
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
         while (true) {
@@ -1257,6 +1259,16 @@ export const layer = Layer.effect(
           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
 
           turnAgent = lastUser.agent ?? ""
+          lastUserText =
+            lastUser.parts
+              .filter((p) => p.type === "text" && !p.synthetic)
+              .map((p) => p.text)
+              .join("\n") || ""
+          lastAssistantText =
+            lastAssistantMsg?.parts
+              .filter((p) => p.type === "text")
+              .map((p) => p.text)
+              .join("\n") || ""
 
           const lastAssistantMsg = msgs.findLast(
             (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
@@ -1431,9 +1443,24 @@ export const layer = Layer.effect(
               const prestart = yield* plugin.trigger(
                 "chat.turn.prestart",
                 { sessionID, agent: agent.name, model: { providerID: model.providerID, modelID: model.id } },
-                { system: [] as string[] },
+                { system: [] as string[], contextText: "" },
               )
               system.push(...prestart.system)
+              if (prestart.contextText) {
+                const ctxMsg = msgs.findLast((m) => m.info.role === "user")
+                if (ctxMsg) {
+                  const parts: any[] = [...ctxMsg.parts]
+                  parts.unshift({
+                    type: "text",
+                    text: prestart.contextText,
+                    synthetic: true,
+                    id: ("id" in parts[0] ? undefined : undefined) as any,
+                    sessionID,
+                    messageID: ctxMsg.info.id,
+                  } as any)
+                  ctxMsg.parts = parts
+                }
+              }
             }
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
@@ -1489,7 +1516,7 @@ export const layer = Layer.effect(
         }
 
         yield* plugin
-          .trigger("chat.turn.end", { sessionID, agent: turnAgent }, {})
+          .trigger("chat.turn.end", { sessionID, agent: turnAgent, lastUserMessage: lastUserText, lastAssistantMessage: lastAssistantText }, {})
           .pipe(Effect.ignore, Effect.forkIn(scope))
 
         yield* compaction.prune({ sessionID }).pipe(Effect.ignore, Effect.forkIn(scope))
