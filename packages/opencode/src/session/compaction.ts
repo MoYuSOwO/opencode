@@ -388,6 +388,13 @@ export const layer = Layer.effect(
         ? yield* provider.getModel(agent.model.providerID, agent.model.modelID).pipe(Effect.orDie)
         : yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID).pipe(Effect.orDie)
       const cfg = yield* config.get()
+
+      // Custom threshold check: skip compaction if below 350K tokens
+      const COMPACTION_THRESHOLD = 350_000
+      const totalEstimate = yield* estimate({ messages, model })
+      if (totalEstimate < COMPACTION_THRESHOLD) {
+        return "continue" as const
+      }
       const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
       const prior = completedCompactions(history)
       const hidden = new Set(prior.flatMap((item) => [item.userIndex, item.assistantIndex]))
@@ -412,170 +419,223 @@ export const layer = Layer.effect(
       const msgs = structuredClone(selected.head)
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
-      // Split head messages 50/50 by token count at message boundary
-      const headTokens = yield* estimate({ messages: msgs, model })
-      const halfTokens = Math.floor(headTokens / 2)
+      const useMultiPass = cfg.compaction?.type === "multi-pass"
+      let result: "continue" | "stop" | "compact"
 
-      let summaryEnd = 0
-      let accumTokens = 0
-      for (const m of msgs) {
-        const t = yield* estimate({ messages: [m], model })
-        if (accumTokens + t > halfTokens && summaryEnd > 0) break
-        accumTokens += t
-        summaryEnd++
-      }
+      if (useMultiPass) {
+        // Split head messages 50/50 by token count at message boundary
+        const headTokens = yield* estimate({ messages: msgs, model })
+        const halfTokens = Math.floor(headTokens / 2)
 
-      const summaryMsgs = msgs.slice(0, summaryEnd)
-      const compressMsgs = msgs.slice(summaryEnd)
+        let summaryEnd = 0
+        let accumTokens = 0
+        for (const m of msgs) {
+          const t = yield* estimate({ messages: [m], model })
+          if (accumTokens + t > halfTokens && summaryEnd > 0) break
+          accumTokens += t
+          summaryEnd++
+        }
 
-      // Build compression prompts
-      const summaryPrompt =
-        compacting.prompt ??
-        buildPrompt({
-          previousSummary,
-          context: compacting.context,
-        }) +
-          "\n\nOutput 5000-10000 tokens. You MUST output in the SAME LANGUAGE as the input. Be thorough — preserve key decisions, user preferences, emotional content, and technical facts. Do not omit important context."
+        const summaryMsgs = msgs.slice(0, summaryEnd)
+        const compressMsgs = msgs.slice(summaryEnd)
 
-      const COMPRESS_SYSTEM = [
-        "You are a conversation compression assistant. Classify each sentence:",
-        "",
-        "1. Emotional content, personal info, casual chat, relationship moments → keep verbatim, do not change a single word",
-        "2. Technical discussion, tool output, code → summarize key points and process, can rewrite but must not lose critical info",
-        "",
-        "Output plain text only. No format markers, no explanations. Same language as input.",
-      ].join("\n")
+        const summaryPrompt =
+          compacting.prompt ??
+          buildPrompt({
+            previousSummary,
+            context: compacting.context,
+          }) +
+            "\n\nOutput 5000-10000 tokens. You MUST output in the SAME LANGUAGE as the input. Be thorough — preserve key decisions, user preferences, emotional content, and technical facts. Do not omit important context."
 
-      const ctx = yield* InstanceState.context
-      const summaryMsg: MessageV2.Assistant = {
-        id: MessageID.ascending(),
-        role: "assistant",
-        parentID: input.parentID,
-        sessionID: input.sessionID,
-        mode: "compaction",
-        agent: "compaction",
-        variant: userMessage.model.variant,
-        summary: true,
-        path: { cwd: ctx.directory, root: ctx.worktree },
-        cost: 0,
-        tokens: { output: 0, input: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-        modelID: model.id,
-        providerID: model.providerID,
-        time: { created: Date.now() },
-      }
-      yield* session.updateMessage(summaryMsg)
+        const COMPRESS_SYSTEM = [
+          "You are a conversation compression assistant. Classify each sentence:",
+          "",
+          "1. Emotional content, personal info, casual chat, relationship moments → keep verbatim, do not change a single word",
+          "2. Technical discussion, tool output, code → summarize key points and process, can rewrite but must not lose critical info",
+          "",
+          "Output plain text only. No format markers, no explanations. Same language as input.",
+        ].join("\n")
 
-      // Summary zone: single LLM call
-      const summaryProcessor = yield* processors.create({
-        assistantMessage: summaryMsg,
-        sessionID: input.sessionID,
-        model,
-      })
-      const summaryModels = yield* MessageV2.toModelMessagesEffect(summaryMsgs, model, {
-        stripMedia: true,
-        toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
-      })
-      const summaryResult = yield* summaryProcessor.process({
-        user: userMessage,
-        agent,
-        sessionID: input.sessionID,
-        tools: {},
-        system: [],
-        messages: [
-          ...summaryModels,
-          { role: "user", content: [{ type: "text", text: summaryPrompt }] },
-        ],
-        model,
-      })
+        const ctx = yield* InstanceState.context
+        const summaryMsg: MessageV2.Assistant = {
+          id: MessageID.ascending(),
+          role: "assistant",
+          parentID: input.parentID,
+          sessionID: input.sessionID,
+          mode: "compaction",
+          agent: "compaction",
+          variant: userMessage.model.variant,
+          summary: true,
+          path: { cwd: ctx.directory, root: ctx.worktree },
+          cost: 0,
+          tokens: { output: 0, input: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: model.id,
+          providerID: model.providerID,
+          time: { created: Date.now() },
+        }
+        yield* session.updateMessage(summaryMsg)
 
-      let combinedOutput = ""
-      if (summaryResult === "continue") {
-        const summaryText = summaryProcessor.message.parts
-          .filter((p) => p.type === "text")
-          .map((p) => p.text)
-          .join("\n\n")
-        combinedOutput = summaryText ? summaryText + "\n\n" : ""
-      } else if (summaryResult === "compact") {
-        summaryProcessor.message.error = new MessageV2.ContextOverflowError({
-          message: "Summary pass exceeds model context limit",
-        }).toObject()
-        summaryProcessor.message.finish = "error"
-        yield* session.updateMessage(summaryProcessor.message)
-        return "stop"
-      }
+        const summaryProcessor = yield* processors.create({
+          assistantMessage: summaryMsg,
+          sessionID: input.sessionID,
+          model,
+        })
+        const summaryModels = yield* MessageV2.toModelMessagesEffect(summaryMsgs, model, {
+          stripMedia: true,
+          toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
+        })
+        const summaryResult = yield* summaryProcessor.process({
+          user: userMessage,
+          agent,
+          sessionID: input.sessionID,
+          tools: {},
+          system: [],
+          messages: [
+            ...summaryModels,
+            { role: "user", content: [{ type: "text", text: summaryPrompt }] },
+          ],
+          model,
+        })
 
-      // Compression zone: compress each message individually, write back to original text
-      const compressMessages = compressMsgs.filter(
-        (m) => m.parts.some((p) => p.type === "text" && !(p as any).synthetic),
-      )
+        let combinedOutput = ""
+        if (summaryResult === "continue") {
+          const summaryText = summaryProcessor.message.parts
+            .filter((p) => p.type === "text")
+            .map((p) => p.text)
+            .join("\n\n")
+          combinedOutput = summaryText ? summaryText + "\n\n" : ""
+        } else if (summaryResult === "compact") {
+          summaryProcessor.message.error = new MessageV2.ContextOverflowError({
+            message: "Summary pass exceeds model context limit",
+          }).toObject()
+          summaryProcessor.message.finish = "error"
+          yield* session.updateMessage(summaryProcessor.message)
+          return "stop"
+        }
 
-      const compressResults = yield* Effect.all(
-        compressMessages.map((msg) =>
-          Effect.gen(function* () {
-            const msgModels = yield* MessageV2.toModelMessagesEffect([msg], model, {
-              stripMedia: true,
-              toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
-            })
-            const text = yield* llm
-              .stream({
-                agent,
-                user: userMessage,
-                system: [COMPRESS_SYSTEM],
-                small: true,
-                tools: {},
-                model,
-                sessionID: input.sessionID,
-                retries: 1,
-                messages: [
-                  ...msgModels,
-                  { role: "user", content: "Compress this message. Keep emotional/personal/relational content verbatim. Summarize technical/tool/code content. Output plain text only." },
-                ],
+        const compressMessages = compressMsgs.filter(
+          (m) => m.parts.some((p) => p.type === "text" && !(p as any).synthetic),
+        )
+
+        const compressResults = yield* Effect.all(
+          compressMessages.map((msg) =>
+            Effect.gen(function* () {
+              const msgModels = yield* MessageV2.toModelMessagesEffect([msg], model, {
+                stripMedia: true,
+                toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
               })
-              .pipe(
-                Stream.filter(LLMEvent.is.textDelta),
-                Stream.map((e) => e.text),
-                Stream.mkString,
-                Effect.orDie,
-              )
-            return { text: text.trim(), msg }
-          }),
-        ),
-        { concurrency: 8 },
-      )
-
-      for (const { text, msg } of compressResults) {
-        combinedOutput += text + "\n\n"
-
-        const textParts = msg.parts.filter(
-          (p): p is MessageV2.TextPart => p.type === "text" && !(p as any).synthetic,
+              const text = yield* llm
+                .stream({
+                  agent,
+                  user: userMessage,
+                  system: [COMPRESS_SYSTEM],
+                  small: true,
+                  tools: {},
+                  model,
+                  sessionID: input.sessionID,
+                  retries: 1,
+                  messages: [
+                    ...msgModels,
+                    { role: "user", content: "Compress this message. Keep emotional/personal/relational content verbatim. Summarize technical/tool/code content. Output plain text only." },
+                  ],
+                })
+                .pipe(
+                  Stream.filter(LLMEvent.is.textDelta),
+                  Stream.map((e) => e.text),
+                  Stream.mkString,
+                  Effect.orDie,
+                )
+              return { text: text.trim(), msg }
+            }),
+          ),
+          { concurrency: 8 },
         )
-        if (textParts.length > 0) {
-          yield* session.updatePart({
-            ...textParts[0],
-            text,
-          } as any)
+
+        for (const { text, msg } of compressResults) {
+          combinedOutput += text + "\n\n"
+
+          const textParts = msg.parts.filter(
+            (p): p is MessageV2.TextPart => p.type === "text" && !(p as any).synthetic,
+          )
+          if (textParts.length > 0) {
+            yield* session.updatePart({
+              ...textParts[0],
+              text,
+            } as any)
+          }
+        }
+
+        const allOutput = combinedOutput.trim()
+        if (allOutput) {
+          const existingParts = summaryProcessor.message.parts.filter(
+            (p) => p.type === "text",
+          )
+          const existingText = existingParts.map((p) => p.text).join("\n\n")
+          const fullText = existingText ? existingText + "\n\n" + allOutput : allOutput
+
+          if (existingParts.length > 0) {
+            yield* session.updatePart({
+              ...existingParts[0],
+              text: fullText,
+            })
+          }
+        }
+
+        result = summaryResult
+      } else {
+        // Original single-pass compaction
+        const nextPrompt = compacting.prompt ?? buildPrompt({ previousSummary, context: compacting.context })
+        const modelMessages = yield* MessageV2.toModelMessagesEffect(msgs, model, {
+          stripMedia: true,
+          toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
+        })
+        const ctx = yield* InstanceState.context
+        const msg: MessageV2.Assistant = {
+          id: MessageID.ascending(),
+          role: "assistant",
+          parentID: input.parentID,
+          sessionID: input.sessionID,
+          mode: "compaction",
+          agent: "compaction",
+          variant: userMessage.model.variant,
+          summary: true,
+          path: { cwd: ctx.directory, root: ctx.worktree },
+          cost: 0,
+          tokens: { output: 0, input: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: model.id,
+          providerID: model.providerID,
+          time: { created: Date.now() },
+        }
+        yield* session.updateMessage(msg)
+        const processor = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: input.sessionID,
+          model,
+        })
+        result = yield* processor.process({
+          user: userMessage,
+          agent,
+          sessionID: input.sessionID,
+          tools: {},
+          system: [],
+          messages: [
+            ...modelMessages,
+            { role: "user", content: [{ type: "text", text: nextPrompt }] },
+          ],
+          model,
+        })
+
+        if (result === "compact") {
+          processor.message.error = new MessageV2.ContextOverflowError({
+            message: replay
+              ? "Conversation history too large to compact - exceeds model context limit"
+              : "Session too large to compact - context exceeds model limit even after stripping media",
+          }).toObject()
+          processor.message.finish = "error"
+          yield* session.updateMessage(processor.message)
+          return "stop"
         }
       }
-
-      // Store compression results in summary message
-      const allOutput = combinedOutput.trim()
-      if (allOutput) {
-        const existingParts = summaryProcessor.message.parts.filter(
-          (p) => p.type === "text",
-        )
-        const existingText = existingParts.map((p) => p.text).join("\n\n")
-        const fullText = existingText ? existingText + "\n\n" + allOutput : allOutput
-
-        // Update summary message text part
-        if (existingParts.length > 0) {
-          yield* session.updatePart({
-            ...existingParts[0],
-            text: fullText,
-          })
-        }
-      }
-
-      const result = summaryResult
 
       if (compactionPart && selected.tail_start_id && compactionPart.tail_start_id !== selected.tail_start_id) {
         yield* session.updatePart({
