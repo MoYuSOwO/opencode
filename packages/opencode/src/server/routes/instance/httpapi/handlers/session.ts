@@ -77,7 +77,6 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
             const items = promptQueues.get(sessionID)
             if (!items || items.length === 0) {
               promptConsumers.delete(sessionID)
-              // Double-check: new items may have been queued between the shift and delete
               if (promptQueues.get(sessionID)?.length) {
                 promptConsumers.add(sessionID)
                 continue
@@ -85,14 +84,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
               return
             }
             const item = items.shift()!
-            // Wait until session is idle
-            for (;;) {
-              const s = yield* statusSvc.get(sessionID)
-              if (s.type === "idle") break
-              yield* Effect.sleep("1 second")
-            }
-            // Send (same as promptAsync)
-            yield* promptSvc.prompt({ ...item, sessionID }).pipe(
+            // Store as user message with noReply — next turn's agent loop picks it up
+            yield* promptSvc.prompt({ ...item, sessionID, noReply: true }).pipe(
               Effect.catchCause((cause) =>
                 Effect.gen(function* () {
                   yield* Effect.logError("prompt_queued failed").pipe(
