@@ -59,49 +59,27 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const bus = yield* Bus.Service
     const scope = yield* Scope.Scope
 
-    // Per-session queue for prompt_queued — ensures ordered, non-concurrent delivery
-    const promptQueues = new Map<SessionID, Array<typeof PromptPayload.Type>>()
-    const promptConsumers = new Set<SessionID>()
-
-    function enqueuePrompt(sessionID: SessionID, payload: typeof PromptPayload.Type) {
-      let q = promptQueues.get(sessionID)
-      if (!q) {
-        q = []
-        promptQueues.set(sessionID, q)
-      }
-      q.push(payload)
-      if (!promptConsumers.has(sessionID)) {
-        promptConsumers.add(sessionID)
-        Effect.gen(function* () {
-          for (;;) {
-            const items = promptQueues.get(sessionID)
-            if (!items || items.length === 0) {
-              promptConsumers.delete(sessionID)
-              if (promptQueues.get(sessionID)?.length) {
-                promptConsumers.add(sessionID)
-                continue
-              }
-              return
-            }
-            const item = items.shift()!
-            // Store as user message with noReply — next turn's agent loop picks it up
-            yield* promptSvc.prompt({ ...item, sessionID, noReply: true }).pipe(
-              Effect.catchCause((cause) =>
-                Effect.gen(function* () {
-                  yield* Effect.logError("prompt_queued failed").pipe(
-                    Effect.annotateLogs({ sessionID, cause }),
-                  )
-                  yield* bus.publish(Session.Event.Error, {
-                    sessionID,
-                    error: new NamedError.Unknown({ message: Cause.pretty(cause) }).toObject(),
-                  })
-                }),
-              ),
+    const promptQueued = Effect.fn("SessionHttpApi.promptQueued")(function* (ctx: {
+      params: { sessionID: SessionID }
+      payload: typeof PromptPayload.Type
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+      yield* promptSvc.prompt({ ...ctx.payload, sessionID: ctx.params.sessionID, noReply: true }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.gen(function* () {
+            yield* Effect.logError("prompt_queued failed").pipe(
+              Effect.annotateLogs({ sessionID: ctx.params.sessionID, cause }),
             )
-          }
-        }).pipe(Effect.forkIn(scope, { startImmediately: true }))
-      }
-    }
+            yield* bus.publish(Session.Event.Error, {
+              sessionID: ctx.params.sessionID,
+              error: new NamedError.Unknown({ message: Cause.pretty(cause) }).toObject(),
+            })
+          }),
+        ),
+        Effect.forkIn(scope, { startImmediately: true }),
+      )
+      return HttpApiSchema.NoContent.make()
+    })
 
     const list = Effect.fn("SessionHttpApi.list")(function* (ctx: { query: typeof ListQuery.Type }) {
       return yield* session.list({
@@ -362,15 +340,6 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         ),
         Effect.forkIn(scope, { startImmediately: true }),
       )
-      return HttpApiSchema.NoContent.make()
-    })
-
-    const promptQueued = Effect.fn("SessionHttpApi.promptQueued")(function* (ctx: {
-      params: { sessionID: SessionID }
-      payload: typeof PromptPayload.Type
-    }) {
-      yield* requireSession(ctx.params.sessionID)
-      enqueuePrompt(ctx.params.sessionID, ctx.payload)
       return HttpApiSchema.NoContent.make()
     })
 
