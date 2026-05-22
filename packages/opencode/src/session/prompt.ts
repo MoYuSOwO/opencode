@@ -1251,7 +1251,7 @@ export const layer = Layer.effect(
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
         // Session start hook — fires once per session
-        if (!sessionStartFired.has(sessionID)) {
+        if (!sessionStartFired.has(sessionID) && !session.parentID) {
           sessionStartFired.add(sessionID)
           yield* plugin
             .trigger("session.start", { sessionID }, {})
