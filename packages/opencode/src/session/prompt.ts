@@ -1250,12 +1250,12 @@ export const layer = Layer.effect(
         let lastModel: { providerID: ProviderID; modelID: ModelID } = { providerID: ProviderID.make(""), modelID: ModelID.make("") }
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
-        // Session start hook — fires once per session
-        if (!sessionStartFired.has(sessionID) && !session.parentID) {
+        // Session start — fires once per session (root sessions only)
+        if (!sessionStartFired.has(sessionID)) {
           sessionStartFired.add(sessionID)
-          yield* plugin
-            .trigger("session.start", { sessionID }, {})
-            .pipe(Effect.ignore)
+          if (!session.parentID) {
+            yield* plugin.trigger("session.start", { sessionID }, {}).pipe(Effect.ignore)
+          }
         }
 
         while (true) {
