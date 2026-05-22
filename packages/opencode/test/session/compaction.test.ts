@@ -242,7 +242,7 @@ const env = Layer.mergeAll(
   SessionCompaction.layer.pipe(Layer.provide(SessionNs.defaultLayer), Layer.provideMerge(deps)),
 )
 
-const it = testEffect(env)
+const it = testEffect(env as any)
 
 const compactionEnv = Layer.mergeAll(SessionNs.defaultLayer, CrossSpawnSpawner.defaultLayer)
 const itCompaction = testEffect(compactionEnv)

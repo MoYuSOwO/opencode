@@ -414,6 +414,8 @@ export const layer = Layer.effect(
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
       let result: "continue" | "stop" | "compact"
+      let compactionMsg: MessageV2.Assistant | undefined
+      let compactionHandle: any
 
       if (isMultiPass) {
         // Split head messages 50/50 by token count at message boundary
@@ -467,12 +469,14 @@ export const layer = Layer.effect(
           time: { created: Date.now() },
         }
         yield* session.updateMessage(summaryMsg)
+        compactionMsg = summaryMsg
 
         const summaryProcessor = yield* processors.create({
           assistantMessage: summaryMsg,
           sessionID: input.sessionID,
           model,
         })
+        compactionHandle = summaryProcessor
         const summaryModels = yield* MessageV2.toModelMessagesEffect(summaryMsgs, model, {
           stripMedia: true,
           toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
@@ -492,7 +496,8 @@ export const layer = Layer.effect(
 
         let combinedOutput = ""
         if (summaryResult === "continue") {
-          const summaryText = summaryProcessor.message.parts
+          const summaryParts = MessageV2.parts(summaryProcessor.message.id)
+          const summaryText = summaryParts
             .filter((p) => p.type === "text")
             .map((p) => p.text)
             .join("\n\n")
@@ -560,7 +565,8 @@ export const layer = Layer.effect(
 
         const allOutput = combinedOutput.trim()
         if (allOutput) {
-          const existingParts = summaryProcessor.message.parts.filter(
+          const summaryParts = MessageV2.parts(summaryProcessor.message.id)
+          const existingParts = summaryParts.filter(
             (p) => p.type === "text",
           )
           const existingText = existingParts.map((p) => p.text).join("\n\n")
@@ -600,11 +606,13 @@ export const layer = Layer.effect(
           time: { created: Date.now() },
         }
         yield* session.updateMessage(msg)
+        compactionMsg = msg
         const processor = yield* processors.create({
           assistantMessage: msg,
           sessionID: input.sessionID,
           model,
         })
+        compactionHandle = processor
         result = yield* processor.process({
           user: userMessage,
           agent,
@@ -721,14 +729,14 @@ export const layer = Layer.effect(
         }
       }
 
-      if (processor.message.error) return "stop"
+      if (compactionMsg && compactionHandle?.message.error) return "stop"
       if (result === "continue") {
         const summary = summaryText(
           (yield* session.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)).find(
-            (item) => item.info.id === msg.id,
+            (item) => item.info.id === compactionMsg?.id,
           ) ?? {
-            info: msg,
-            parts: [],
+            info: compactionMsg,
+            parts: [] as MessageV2.Part[],
           },
         )
         if (flags.experimentalEventSystem) {

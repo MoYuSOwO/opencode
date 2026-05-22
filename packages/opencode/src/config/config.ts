@@ -270,6 +270,12 @@ export const Info = Schema.Struct({
       auto: Schema.optional(Schema.Boolean).annotate({
         description: "Enable automatic compaction when context is full (default: true)",
       }),
+      type: Schema.optional(Schema.Literals(["multi-pass"])).annotate({
+        description: "Compaction type: multi-pass for three-zone pipeline (cairn fork)",
+      }),
+      trigger_tokens: Schema.optional(PositiveInt).annotate({
+        description: "Token threshold to trigger compaction (cairn fork)",
+      }),
       prune: Schema.optional(Schema.Boolean).annotate({
         description: "Enable pruning of old tool outputs (default: true)",
       }),
