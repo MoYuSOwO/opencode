@@ -1339,7 +1339,7 @@ export const layer = Layer.effect(
             const triggerTokens = cfg.compaction?.trigger_tokens
             const shouldCompact =
               triggerTokens != null
-                ? lastFinished.tokens.input + lastFinished.tokens.output > triggerTokens
+                ? (lastFinished.tokens.total ?? 0) > triggerTokens
                 : yield* compaction.isOverflow({ tokens: lastFinished.tokens, model })
             if (shouldCompact) {
               yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
