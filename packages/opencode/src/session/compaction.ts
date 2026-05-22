@@ -494,15 +494,7 @@ export const layer = Layer.effect(
           model,
         })
 
-        let combinedOutput = ""
-        if (summaryResult === "continue") {
-          const summaryParts = MessageV2.parts(summaryProcessor.message.id)
-          const summaryText = summaryParts
-            .filter((p) => p.type === "text")
-            .map((p) => p.text)
-            .join("\n\n")
-          combinedOutput = summaryText ? summaryText + "\n\n" : ""
-        } else if (summaryResult === "compact") {
+        if (summaryResult === "compact") {
           summaryProcessor.message.error = new MessageV2.ContextOverflowError({
             message: "Summary pass exceeds model context limit",
           }).toObject()
@@ -543,41 +535,27 @@ export const layer = Layer.effect(
                   Stream.mkString,
                   Effect.orDie,
                 )
-              return { text: text.trim(), msg }
+              return { text: text.trim() }
             }),
           ),
-          { concurrency: 8 },
+          { concurrency: 100 },
         )
 
-        for (const { text, msg } of compressResults) {
-          combinedOutput += text + "\n\n"
-
-          const textParts = msg.parts.filter(
-            (p): p is MessageV2.TextPart => p.type === "text" && !(p as any).synthetic,
-          )
-          if (textParts.length > 0) {
-            yield* session.updatePart({
-              ...textParts[0],
-              text,
-            } as any)
-          }
-        }
-
-        const allOutput = combinedOutput.trim()
-        if (allOutput) {
-          const summaryParts = MessageV2.parts(summaryProcessor.message.id)
-          const existingParts = summaryParts.filter(
-            (p) => p.type === "text",
-          )
-          const existingText = existingParts.map((p) => p.text).join("\n\n")
-          const fullText = existingText ? existingText + "\n\n" + allOutput : allOutput
-
-          if (existingParts.length > 0) {
-            yield* session.updatePart({
-              ...existingParts[0],
-              text: fullText,
-            })
-          }
+        for (const { text } of compressResults) {
+          const compressedMsg = yield* session.updateMessage({
+            id: MessageID.ascending(),
+            role: "assistant",
+            parentID: summaryMsg.id,
+            sessionID: input.sessionID,
+            time: { created: Date.now() },
+          })
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID: compressedMsg.id,
+            sessionID: input.sessionID,
+            type: "text",
+            text,
+          })
         }
 
         result = summaryResult
