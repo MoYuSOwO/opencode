@@ -1,4 +1,4 @@
-# xiaoxun fork of OpenCode
+# cairn fork of OpenCode
 
 Soft fork adding lifecycle hooks, silent agents, and multi-pass compaction.
 
