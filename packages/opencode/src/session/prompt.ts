@@ -1542,8 +1542,8 @@ export const layer = Layer.effect(
           { tasks: [] as Array<{ subagent_type: string; description: string; prompt: string; background?: boolean; silent?: boolean }> },
         )
 
-        // Spawn background agent tasks
-        for (const taskDef of endResult.tasks) {
+        // Spawn background agent tasks (root sessions only, not subagents)
+        if (!session.parentID) for (const taskDef of endResult.tasks) {
           const taskAgent = yield* agents.get(taskDef.subagent_type)
           if (taskAgent) {
             const taskModel = taskAgent.model ?? lastModel
@@ -1555,15 +1555,14 @@ export const layer = Layer.effect(
             })
             const taskParts = yield* resolvePromptParts(taskDef.prompt)
             yield* sessions.touch(silentSession.id)
-            yield* ops
-              .prompt({
-                sessionID: silentSession.id,
-                model: taskModel,
-                agent: taskAgent.name,
-                tools: { task: false },
-                parts: taskParts,
-                noReply: true,
-              })
+            const { prompt } = yield* ops()
+            yield* prompt({
+              sessionID: silentSession.id,
+              model: taskModel,
+              agent: taskAgent.name,
+              tools: { task: false },
+              parts: taskParts,
+            })
               .pipe(Effect.ignore, Effect.forkIn(scope))
           }
         }
