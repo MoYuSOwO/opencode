@@ -3,7 +3,6 @@ import { Bus } from "@/bus"
 import { Command } from "@/command"
 import { Permission } from "@/permission"
 import { PermissionID } from "@/permission/schema"
-import { Queue } from "effect"
 import { SessionShare } from "@/share/session"
 import { Session } from "@/session/session"
 import { SessionCompaction } from "@/session/compaction"
@@ -61,17 +60,31 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const scope = yield* Scope.Scope
 
     // Per-session queue for prompt_queued — ensures ordered, non-concurrent delivery
-    const promptQueue = new Map<SessionID, Queue.Queue<typeof PromptPayload.Type>>()
+    const promptQueues = new Map<SessionID, Array<typeof PromptPayload.Type>>()
+    const promptConsumers = new Set<SessionID>()
 
     function enqueuePrompt(sessionID: SessionID, payload: typeof PromptPayload.Type) {
-      let q = promptQueue.get(sessionID)
+      let q = promptQueues.get(sessionID)
       if (!q) {
-        q = Queue.unbounded<typeof PromptPayload.Type>()
-        promptQueue.set(sessionID, q)
-        // Start single consumer for this session
+        q = []
+        promptQueues.set(sessionID, q)
+      }
+      q.push(payload)
+      if (!promptConsumers.has(sessionID)) {
+        promptConsumers.add(sessionID)
         Effect.gen(function* () {
           for (;;) {
-            const item = yield* q.pipe(Queue.take)
+            const items = promptQueues.get(sessionID)
+            if (!items || items.length === 0) {
+              promptConsumers.delete(sessionID)
+              // Double-check: new items may have been queued between the shift and delete
+              if (promptQueues.get(sessionID)?.length) {
+                promptConsumers.add(sessionID)
+                continue
+              }
+              return
+            }
+            const item = items.shift()!
             // Wait until session is idle
             for (;;) {
               const s = yield* statusSvc.get(sessionID)
@@ -95,7 +108,6 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
           }
         }).pipe(Effect.forkIn(scope, { startImmediately: true }))
       }
-      q.unsafeOffer(payload)
     }
 
     const list = Effect.fn("SessionHttpApi.list")(function* (ctx: { query: typeof ListQuery.Type }) {
